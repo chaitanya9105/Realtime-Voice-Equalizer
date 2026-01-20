@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Circular Audio Visualizer</title>
+    <style>
+        body { 
+            margin: 0; 
+            background: #0f0f0f; 
+            display: flex; 
+            flex-direction: column; 
+            align-items: center; 
+            justify-content: center; 
+            height: 100vh; 
+            color: white; 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+        }
+
+        /* Container for the visualizer */
+        .container {
+            position: relative;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        canvas { 
+            /* Creates the glowing effect */
+            filter: drop-shadow(0 0 15px rgba(0, 210, 255, 0.5)); 
+        }
+
+        /* Transcription Text Area */
+        #transcriptionBox {
+            margin-top: 30px;
+            width: 80%;
+            max-width: 600px;
+            height: 100px;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            color: #00d2ff;
+            font-size: 1.1rem;
+            text-align: center;
+            overflow-y: auto;
+        }
+
+        button { 
+            padding: 12px 30px; 
+            font-size: 18px; 
+            cursor: pointer; 
+            background: linear-gradient(45deg, #00d2ff, #3a7bd5); 
+            border: none; 
+            border-radius: 30px; 
+            color: white; 
+            font-weight: bold; 
+            margin-bottom: 30px; 
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        button:hover { 
+            transform: scale(1.05); 
+            box-shadow: 0 0 20px rgba(0, 210, 255, 0.6); 
+        }
+        
+        .status {
+            margin-top: 10px;
+            font-size: 0.9rem;
+            color: #666;
+        }
+    </style>
+</head>
+<body>
+
+    <button id="startBtn">Start Visualizer & Stream</button>
+    
+    <div class="container">
+        <canvas id="visualizer" width="600" height="600"></canvas>
+    </div>
+
+    <div id="transcriptionBox">Transcription will appear here...</div>
+    <div class="status" id="connectionStatus">Status: Disconnected</div>
+
+    <script>
+        const canvas = document.getElementById('visualizer');
+        const ctx = canvas.getContext('2d');
+        const startBtn = document.getElementById('startBtn');
+        const transcriptionBox = document.getElementById('transcriptionBox');
+        const connectionStatus = document.getElementById('connectionStatus');
+
+        let audioContext, analyser, dataArray, source;
+        let socket; 
+
+        startBtn.addEventListener('click', async () => {
+            startBtn.style.display = 'none';
+            connectionStatus.innerText = "Status: Initializing Audio...";
+            
+            try {
+                // 1. Init Audio Context
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                
+                // 2. Get Mic Stream
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                source = audioContext.createMediaStreamSource(stream);
+                
+                // 3. Setup Analyser for Visualizer
+                analyser = audioContext.createAnalyser();
+                analyser.fftSize = 256; // Controls bar density
+                source.connect(analyser);
+                
+                const bufferLength = analyser.frequencyBinCount;
+                dataArray = new Uint8Array(bufferLength);
+
+                // 4. Setup Processor for Streaming to Backend
+                // Using ScriptProcessor for simplicity in this demo (AudioWorklet is better for prod)
+                const recorder = audioContext.createScriptProcessor(4096, 1, 1);
+                source.connect(recorder);
+                recorder.connect(audioContext.destination);
+
+                // 5. Connect to Backend WebSocket
+                setupWebSocket(recorder);
+
+                // 6. Start Animation Loop
+                animate();
+
+            } catch (err) {
+                console.error("Error accessing mic:", err);
+                alert("Microphone access denied or error occurred.");
+                startBtn.style.display = 'block';
+            }
+        });
+
+        function setupWebSocket(recorder) {
+            // Connect to your Spring Boot WebSocket URL
+            socket = new WebSocket("ws://localhost:8080/audio-stream");
+            
+            socket.onopen = () => {
+                console.log("Connected to Backend");
+                connectionStatus.innerText = "Status: Connected to Server";
+                connectionStatus.style.color = "#00ff00";
+            };
+            
+            socket.onerror = (error) => {
+                console.error("WebSocket Error:", error);
+                connectionStatus.innerText = "Status: Connection Error (Check Backend Console)";
+                connectionStatus.style.color = "red";
+            };
+
+            // Send Audio Data
+            recorder.onaudioprocess = (e) => {
+                if (socket.readyState === WebSocket.OPEN) {
+                    const inputData = e.inputBuffer.getChannelData(0); 
+                    // Send raw float data
+                    socket.send(inputData); 
+                }
+            };
+
+            // Receive Transcription
+            socket.onmessage = (event) => {
+                console.log("Received:", event.data);
+                transcriptionBox.innerText = event.data;
+            };
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            analyser.getByteFrequencyData(dataArray);
+
+            // Clear Canvas
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            const centerX = canvas.width / 2;
+            const centerY = canvas.height / 2;
+            const radius = 80; // Size of the inner empty circle
+
+            // Draw Circular Bars
+            const bars = dataArray.length; 
+            const step = (Math.PI * 2) / bars;
+
+            dataArray.forEach((value, i) => {
+                // Scale bar height based on volume
+                const barHeight = (value / 255) * 120; 
+                const angle = i * step;
+
+                ctx.save();
+                ctx.translate(centerX, centerY);
+                ctx.rotate(angle);
+
+                // Create Gradient Color
+                const gradient = ctx.createLinearGradient(0, 0, 0, 200);
+                gradient.addColorStop(0, '#00d2ff'); // Cyan
+                gradient.addColorStop(1, '#3a7bd5'); // Blue
+
+                ctx.fillStyle = gradient;
+                
+                // Draw main bar (outward)
+                ctx.fillRect(0, radius, 6, barHeight); 
+                
+                // Draw faint reflection (inward) for style
+                ctx.fillStyle = "rgba(255, 255, 255, 0.1)";
+                ctx.fillRect(0, radius, 6, -barHeight * 0.1); 
+
+                ctx.restore();
+            });
+            
+            // Draw Center Decorative Circle
+            ctx.beginPath();
+            ctx.arc(centerX, centerY, radius - 5, 0, Math.PI * 2);
+            ctx.strokeStyle = '#00d2ff';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+        }
+    </script>
+</body>
+</html>
